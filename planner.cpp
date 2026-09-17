@@ -31,7 +31,7 @@ using namespace std;
 
 void Planner::displayWelcomeMessage() {
   cout << BLUE << "*********************************************************" << RESET << endl;
-  cout << RED << "Welcome to the CS293 Travel Planner (Autumn 2022 version)" << RESET << endl;
+  cout << RED << "Welcome to the Algorithmic Railway Search Planner" << RESET << endl;
   cout << BLUE << "*********************************************************" << RESET << endl;
   cout << endl;
 }
@@ -283,7 +283,7 @@ bool Planner::doAdminJob() {
 	listOfObjects<TrainInfoPerStation *> *newTrainInfo;
 	TrainInfoPerStation *stnTrainInfo, *prevStnTrainInfo;
 	int depTime, arrTime, dayCount;
-	int len, numStops, journeyCode;
+	int numStops, journeyCode;
 	Entry<int> *stnEntry;
 	int daysOfWeek;
 	int *stnIndicesOfStops;
@@ -1462,6 +1462,10 @@ bool Planner::addStationName(string stnName) {
       delete toDelete;
     }
 
+    if (!successFlag) {
+      return false;
+    }
+
     // Finally increment numStations
     numStations ++;
     
@@ -1508,6 +1512,15 @@ bool Planner::delStationName(string stnName) {
 	cout << "Successfully deleted" << endl;
 	currWord = currWord->next;
       }
+    }
+
+    if (!successFlag) {
+      while (allWords != nullptr) {
+	listOfObjects<string> *toDelete = allWords;
+	allWords = allWords->next;
+	delete toDelete;
+      }
+      return false;
     }
 
     // Now remove stnName from stnNameToIndex
@@ -1751,6 +1764,41 @@ int Planner::addReview(int jCode, string srcStnName, string destStnName, string 
 }
 
 bool Planner::delReview(int reviewId) {
+  // Review ids are global, so search every source/destination/journey bucket.
+  // Unlinking in-place preserves all unrelated reviews and journey entries.
+  for (int source = 0; source < DICT_SIZE; source++) {
+    for (int destination = 0; destination < DICT_SIZE; destination++) {
+      listOfObjects<JourneyCodeReview> *journey =
+          jCRMatrix[source][destination];
+
+      while (journey != nullptr) {
+        listOfObjects<Review> *previousReview = nullptr;
+        listOfObjects<Review> *currentReview = journey->object.reviews;
+
+        while (currentReview != nullptr) {
+          if (currentReview->object.revId == reviewId) {
+            if (previousReview == nullptr) {
+              journey->object.reviews = currentReview->next;
+            }
+            else {
+              previousReview->next = currentReview->next;
+            }
+
+            if (currentReview->next != nullptr) {
+              currentReview->next->prev = previousReview;
+            }
+            delete currentReview;
+            return true;
+          }
+
+          previousReview = currentReview;
+          currentReview = currentReview->next;
+        }
+
+        journey = journey->next;
+      }
+    }
+  }
 
   return false;
 }
@@ -1782,17 +1830,21 @@ listOfObjects<JourneyCodeReview> * Planner::findJCodeReviews(string srcStnName, 
 inline void Planner::printWithHighlight(string text, int startHLight, int lenHLight) {
 
   int endHLight = startHLight + lenHLight - 1;
-  
-  if (!((startHLight >= 0) && (startHLight < text.length()) &&
-	(lenHLight > 0) && (endHLight < text.length()))) {
+
+  if ((startHLight < 0) || (lenHLight <= 0) ||
+      (static_cast<size_t>(startHLight) >= text.length()) ||
+      (endHLight < 0) || (static_cast<size_t>(endHLight) >= text.length())) {
     logFile << "Incorrect arguments for printWithHighlight" << endl;
     cout << "Incorrect arguments for printing with highlighting. Going ahead with normal print" << endl;
     cout << text;
+    return;
   }
-  
+
   string prefix = (startHLight > 0) ? text.substr(0, startHLight) : "";
   string hLight = text.substr(startHLight, lenHLight);
-  string suffix = (endHLight < text.length()-1) ? text.substr(endHLight+1, text.length()-endHLight-1) : "";
+  string suffix = (static_cast<size_t>(endHLight) < text.length()-1)
+                      ? text.substr(endHLight+1, text.length()-endHLight-1)
+                      : "";
 
   cout << prefix;
   cout << GREEN << hLight << RESET;
@@ -1893,7 +1945,6 @@ void Planner::printStationInfo(listOfObjects<TrainInfoPerStation *> *stnInfoList
 
   currList = stnInfoList;
   expandedList = nullptr;
-  int listLength = 0;
   while (currList != nullptr) {
     currInfo = currList->object;
     if (currInfo != nullptr) {
@@ -1929,7 +1980,6 @@ void Planner::printStationInfo(listOfObjects<TrainInfoPerStation *> *stnInfoList
 	    expandedList->prev = newExpandedListElement;
 	    expandedList = newExpandedListElement;
 	  }
-	  listLength++;
 	}
       }
     }
@@ -1937,7 +1987,6 @@ void Planner::printStationInfo(listOfObjects<TrainInfoPerStation *> *stnInfoList
   }
 
   Quicksort(expandedList);
-  // QuicksortSimple(expandedList, 0, listLength-1);
   
   currList = expandedList;
   while (currList != nullptr) {

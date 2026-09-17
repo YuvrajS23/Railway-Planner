@@ -17,6 +17,9 @@
 #include "codes.h"
 #endif
 
+#include <cstddef>
+#include <utility>
+
 // If you are using the updated planner.cpp, then you simply need to
 // sort the list of TrainInfoPerStation objects in stnInfoList.  The
 // function that calls Quicksort in planner.cpp (i.e. printStationInfo)
@@ -74,81 +77,160 @@
 // Quicksort and QuicksortSimple potentially stand to gain some bonus
 // points.
 
-void Planner::Quicksort(listOfObjects<TrainInfoPerStation *> *stnInfoList)
-{
-  // A few static variable declarations
-  static int K = 4; // Parameter to be experimented with
-  static int recursionLevel = -1; // This can be used to find out at which
-                                  // level of the recursion you are in
+namespace {
 
-  // Increment recursion level on entering the function
-  recursionLevel++;
-  
-  // If you need to set up additional storage (upto n/K TrainInfoPerStation
-  // elements), it's ok to do it *once* using static variables/array.
-  // Using the static recursionLevel, you can ensure that the storage
-  // allocation is done only the first time Quicksort is called, and not
-  // in every recursive call.
-  //
-  // Note that if you allocate space for upto n/K TrainInfoPerStation in
-  // each recursive call, you will end up using much more than n/K space
-  // overall.  So you MUST NOT allocate space in each recursive call.
-  //
-  // A variable/array defined using static is not created afresh in
-  // each recursive call.  Instead, a single copy of it is maintained
-  // across all recursions.
-  
-  if (recursionLevel == 0) {
-    // Find length of the list stnInfoList, if needed.
-    // Allocate additional space for upto n/K TrainInfoPerStation objects
-    // if needed.
-    // Do other things that you may want to do only at the beginning
-    // as a pre-processing step.
+typedef listOfObjects<TrainInfoPerStation *> TrainNode;
+
+int firstOperatingDay(const TrainInfoPerStation *train) {
+  for (int day = 0; day < 7; ++day) {
+    if (train->daysOfWeek[day]) {
+      return day;
+    }
   }
-  
-  // Put your code for the core of Quicksort here
-
-  // Decrement recursion level before leaving the function
-  recursionLevel--;
-  return;
+  // A malformed/no-service entry sorts after every valid day.
+  return 7;
 }
 
-void Planner::QuicksortSimple(listOfObjects<TrainInfoPerStation *> *stnInfoList, int start, int end)
-{
-  // A few static variable declarations
-  static int K = 4; // Parameter to be experimented with
-  static int recursionLevel = -1; // This can be used to find out at which
-                                  // level of the recursion you are in
-
-  // Increment recursion level on entering the function
-  recursionLevel++;
-  
-  // If you need to set up additional storage (upto n/K TrainInfoPerStation
-  // elements), it's ok to do it *once* using static variables/array.
-  // Using the static recursionLevel, you can ensure that the storage
-  // allocation is done only the first time Quicksort is called, and not
-  // in every recursive call.
-  //
-  // Note that if you allocate space for upto n/K TrainInfoPerStation in
-  // each recursive call, you will end up using much more than n/K space
-  // overall.  So you MUST NOT allocate space in each recursive call.
-  //
-  // A variable/array defined using static is not created afresh in
-  // each recursive call.  Instead, a single copy of it is maintained
-  // across all recursions.
-  
-  if (recursionLevel == 0) {
-    // Allocate additional space for upto n/K TrainInfoPerStation objects
-    // if needed.
-    // Do other things that you may want to do only at the beginning
-    // as a pre-processing step.
+bool trainComesBefore(const TrainInfoPerStation *left,
+                      const TrainInfoPerStation *right) {
+  if (left == right) {
+    return false;
   }
-  
-  // Put your code for the core of QuicksortSimple here
+  if (left == nullptr) {
+    return false;
+  }
+  if (right == nullptr) {
+    return true;
+  }
 
-  // Decrement recursion level before leaving the function
-  recursionLevel--;
-  return;
+  const int leftDay = firstOperatingDay(left);
+  const int rightDay = firstOperatingDay(right);
+  if (leftDay != rightDay) {
+    return leftDay < rightDay;
+  }
+  if (left->depTime != right->depTime) {
+    return left->depTime < right->depTime;
+  }
+
+  // The remaining fields make output repeatable when departure keys tie.
+  if (left->arrTime != right->arrTime) {
+    return left->arrTime < right->arrTime;
+  }
+  if (left->journeyCode != right->journeyCode) {
+    return left->journeyCode < right->journeyCode;
+  }
+  if (left->stopSeq != right->stopSeq) {
+    return left->stopSeq < right->stopSeq;
+  }
+  for (int day = 0; day < 7; ++day) {
+    if (left->daysOfWeek[day] != right->daysOfWeek[day]) {
+      return left->daysOfWeek[day] < right->daysOfWeek[day];
+    }
+  }
+  return false;
+}
+
+TrainNode *middleNode(TrainNode *first, std::size_t length) {
+  TrainNode *middle = first;
+  for (std::size_t i = 0; i < length / 2; ++i) {
+    middle = middle->next;
+  }
+  return middle;
+}
+
+struct PartitionResult {
+  TrainNode *pivot;
+  std::size_t leftSize;
+};
+
+PartitionResult partitionRange(TrainNode *first, TrainNode *last,
+                               std::size_t length) {
+  // A middle-element pivot avoids the common quadratic case for data already
+  // ordered by day and time. Swapping payload pointers preserves list links.
+  TrainNode *chosenPivot = middleNode(first, length);
+  using std::swap;
+  swap(chosenPivot->object, last->object);
+
+  TrainInfoPerStation *pivotValue = last->object;
+  TrainNode *boundary = first->prev;
+  std::size_t leftSize = 0;
+
+  for (TrainNode *cursor = first; cursor != last; cursor = cursor->next) {
+    // cursor <= pivot, expressed using only the strict comparator.
+    if (!trainComesBefore(pivotValue, cursor->object)) {
+      boundary = (boundary == nullptr) ? first : boundary->next;
+      swap(boundary->object, cursor->object);
+      ++leftSize;
+    }
+  }
+
+  boundary = (boundary == nullptr) ? first : boundary->next;
+  swap(boundary->object, last->object);
+  return PartitionResult{boundary, leftSize};
+}
+
+void quicksortRange(TrainNode *first, TrainNode *last, std::size_t length) {
+  // Recurse only into the smaller partition and iterate over the larger one.
+  // This caps auxiliary stack space at O(log n), including poor pivot splits.
+  while (first != nullptr && last != nullptr && length > 1) {
+    const PartitionResult result = partitionRange(first, last, length);
+    const std::size_t rightSize = length - result.leftSize - 1;
+
+    if (result.leftSize < rightSize) {
+      if (result.leftSize > 1) {
+        quicksortRange(first, result.pivot->prev, result.leftSize);
+      }
+      first = result.pivot->next;
+      length = rightSize;
+    } else {
+      if (rightSize > 1) {
+        quicksortRange(result.pivot->next, last, rightSize);
+      }
+      last = result.pivot->prev;
+      length = result.leftSize;
+    }
+  }
+}
+
+}  // namespace
+
+void Planner::Quicksort(listOfObjects<TrainInfoPerStation *> *stnInfoList) {
+  if (stnInfoList == nullptr) {
+    return;
+  }
+
+  TrainNode *last = stnInfoList;
+  std::size_t length = 1;
+  while (last->next != nullptr) {
+    last = last->next;
+    ++length;
+  }
+  quicksortRange(stnInfoList, last, length);
+}
+
+void Planner::QuicksortSimple(
+    listOfObjects<TrainInfoPerStation *> *stnInfoList, int start, int end) {
+  if (stnInfoList == nullptr || start < 0 || end < start) {
+    return;
+  }
+
+  TrainNode *first = stnInfoList;
+  for (int index = 0; index < start && first != nullptr; ++index) {
+    first = first->next;
+  }
+  if (first == nullptr) {
+    return;
+  }
+
+  TrainNode *last = first;
+  std::size_t length = 1;
+  const std::size_t requestedLength =
+      static_cast<std::size_t>(end) - static_cast<std::size_t>(start) + 1;
+  while (length < requestedLength && last->next != nullptr) {
+    last = last->next;
+    ++length;
+  }
+  quicksortRange(first, last, length);
 }
 
 #endif

@@ -5,234 +5,337 @@
 #include "std_headers.h"
 #endif
 
+#include <algorithm>
+#include <functional>
+#include <limits>
+#include <map>
+#include <queue>
+#include <utility>
+#include <vector>
+
 using namespace std;
 
-// Customized Train information per station with additional StopOver count
-class TrainInfoPerStation {
-public:
-  int journeyCode; // same as train number
-  unsigned short stopSeq; // sequence of this station's stop in
-                          // itinerary of train, i.e. 1st stop in journey
-                          // or 2nd stop in journey or ...
-  bool daysOfWeek[7]; // Days of week when this train travels
-                      // to/from this station
-  int arrTime;  // Arrival time at station; -1 if train starts from here
-  int depTime;  // Departure time from station; -1 if train ends here
-  int StopOVerCount;
+namespace {
 
-public:
-  TrainInfoPerStation(int jCode, unsigned short stpSq, int aTm, int dTm)
+const int MINUTES_PER_DAY = 24 * 60;
+const int MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY;
+
+// A state includes the service on which the traveller arrived.  That makes
+// train changes (rather than every intermediate station) count as stop-overs.
+struct JourneyStateKey {
+  int station;
+  int journeyCode;
+  int stopSequence;
+  int stopOvers;
+
+  bool operator<(const JourneyStateKey &other) const
   {
-    journeyCode = jCode;
-    stopSeq = stpSq;
-    arrTime = aTm;
-    depTime = dTm;
-    for (int i = 0; i < 7; i++) { daysOfWeek[i] = false;}
-    StopOverCount = 0;
+    if (station != other.station) return station < other.station;
+    if (journeyCode != other.journeyCode) return journeyCode < other.journeyCode;
+    if (stopSequence != other.stopSequence) return stopSequence < other.stopSequence;
+    return stopOvers < other.stopOvers;
   }
-
-  ~TrainInfoPerStation() {;}
-
-  void setDayOfWeek(int i) { if ((0 <= i) && (i < 7)) daysOfWeek[i] = true; }
-  void resetDayOfWeek(int i) { if ((0 <= i) && (i < 7)) daysOfWeek[i] = false; }
-    
 };
 
-// Queue for storing adjacent vertices into list and pop first element and add its adjacent vertices to the end of the list
-class Queue{
-
-  StationConnectionInfo** adjancencyFiltered;
-
-  // Track of index to insert next element
-  int nextIndex;
-
-  public:
-
-  Queue() {
-    adjancencyFiltered = new StationConnectionInfo* [DICT_SIZE];
-
-    for (int i = 0; i < DICT_SIZE; i++) {
-      adjancencyFiltered[i] = new StationConnectionInfo();
-    }
-
-    nextIndex = 0;
-  }
-
-  void insert(StationConnectionInfo* next) {
-    adjancencyFiltered[nextIndex] = next;
-    nextIndex++;
-  }
-
-  // Returns first element and removes it from the list
-  StationConnectionInfo* pop() {
-
-    StationConnectionInfo* temp = adjancencyFiltered[0];
-    for (int i = 0; i < nextIndex; i++) {
-      adjancencyFiltered[i] = adjancencyFiltered[i+1];
-    }
-    nextIndex--;
-
-    return temp;
-  }
-
-  // Checks if Queue is empty or not
-  bool isEmpty() {
-    return nextIndex == 0;
-  }
-
+struct JourneySearchNode {
+  JourneyStateKey key;
+  TrainInfoPerStation *arrivalInfo;
+  int elapsedMinutes;
+  int previousNode;
+  int journeyCodeUsed;
+  int transferWaitMinutes;
+  int travelMinutes;
 };
-  
-void Planner::printPlanJourneys(string srcStnName, string destStnName, int maxStopOvers, int maxTransitTime)
+
+bool parseRailwayTime(int railwayTime, int &minutesAfterMidnight)
 {
+  if (railwayTime < 0) return false;
 
-  // insert your code here
-  
-  // Whenever you need to print a journey, construct a
-  // listOfObjects<TrainInfoPerStation *> appropriately, and then
-  // use printStationInfo that we had used in Lab 7.
-  // printStationInfo is a private member function of
-  // the Planner class. It is declared in planner.h and implemented in
-  // planner.cpp
-
-
-  // Stationindex of source
-  int index1 = stnNameToIndex.get(srcStnName)->value;
-
-  // Stationindex of destination
-  int index2 = stnNameToIndex.get(destStnName)->value;
-
-  // To track if printList variable has been created or not
-  bool made = false;
-  listOfObjects<TrainInfoPerStation *> * printList;
-  listOfObjects<listOfObjects<TrainInfoPerStation *>> * trackList;
-
-  Queue* queue = new Queue();
-
-  // index of source
-  StationAdjacencyList temp = adjacency[index1];
-  // Adjacent vertices of source to next station rather than backwards
-  listOfObjects<StationConnectionInfo *> *to = temp.toStations;
-
-  // Traverse through all adjacent vertices
-  while(to != nullptr){
-
-    listOfObjects<TrainInfoPerStation *> *temp = to->object->trains;
-    
-    // Station index of adjacent vertex
-    int nextindex = to->object->adjacentStnIndex;
-
-    if (nextindex == index2) {
-      while (temp != nullptr) {
-        if (!made) {
-          // printList = new listOfObjects<TrainInfoPerStation *>(temp->object);
-          made = true;
-        } else {
-          // printList->next = new listOfObjects<TrainInfoPerStation *>(temp->object);
-        }
-        temp = temp->next;
-      }
-    } else {
-      
-      // If station not found, then we will add it to the queue
-      queue->insert(to->object);
-    }
-
-    to = to->next;
+  int hours = railwayTime / 100;
+  int minutes = railwayTime % 100;
+  if ((hours < 0) || (hours > 23) || (minutes < 0) || (minutes > 59)) {
+    return false;
   }
 
-  // First while loop is for looping through all adjacent vertices of source
-  // Based on the first loop, we have added necessary vertices to the queue
-  // Second while loop is for looping through all vertices in the queue
-  // Only intersection of trains based on same JourneyCode will be added to "newInsert" and inserted to queue
+  minutesAfterMidnight = hours * 60 + minutes;
+  return true;
+}
 
+bool hasOperatingDay(const TrainInfoPerStation *trainInfo)
+{
+  if (trainInfo == nullptr) return false;
+  for (int day = 0; day < 7; day++) {
+    if (trainInfo->daysOfWeek[day]) return true;
+  }
+  return false;
+}
 
-  while (!queue->isEmpty()) {
-      
-      StationConnectionInfo* temp = queue->pop();
+// Return the shortest forward interval between two weekly timetable events.
+// If older input data has no weekday flags, fall back to the clock values.
+int timetableInterval(const TrainInfoPerStation *fromInfo,
+                      bool useDepartureAtFrom,
+                      const TrainInfoPerStation *toInfo,
+                      bool useDepartureAtTo)
+{
+  if ((fromInfo == nullptr) || (toInfo == nullptr)) return -1;
 
+  int fromMinutes = 0;
+  int toMinutes = 0;
+  int fromTime = useDepartureAtFrom ? fromInfo->depTime : fromInfo->arrTime;
+  int toTime = useDepartureAtTo ? toInfo->depTime : toInfo->arrTime;
+  if (!parseRailwayTime(fromTime, fromMinutes) ||
+      !parseRailwayTime(toTime, toMinutes)) {
+    return -1;
+  }
 
-      //Adjacent
-      StationAdjacencyList temp3 = adjacency[temp->adjacentStnIndex];
-      listOfObjects<StationConnectionInfo *> *to2 = temp3.toStations;
+  int best = numeric_limits<int>::max();
+  if (hasOperatingDay(fromInfo) && hasOperatingDay(toInfo)) {
+    for (int fromDay = 0; fromDay < 7; fromDay++) {
+      if (!fromInfo->daysOfWeek[fromDay]) continue;
+      int fromWeekMinute = fromDay * MINUTES_PER_DAY + fromMinutes;
 
+      for (int toDay = 0; toDay < 7; toDay++) {
+        if (!toInfo->daysOfWeek[toDay]) continue;
+        int toWeekMinute = toDay * MINUTES_PER_DAY + toMinutes;
+        int interval = (toWeekMinute - fromWeekMinute + MINUTES_PER_WEEK) %
+                       MINUTES_PER_WEEK;
+        best = min(best, interval);
+      }
+    }
+  }
+  else {
+    best = (toMinutes - fromMinutes + MINUTES_PER_DAY) % MINUTES_PER_DAY;
+  }
 
-      StationConnectionInfo* newInsert = new StationConnectionInfo();
+  return (best == numeric_limits<int>::max()) ? -1 : best;
+}
 
-      while(to2 != nullptr){
+string formatMinutes(int minutes)
+{
+  ostringstream output;
+  output << (minutes / 60) << "h " << (minutes % 60) << "m";
+  return output.str();
+}
 
-        bool added = false;
+} // namespace
 
-      listOfObjects<TrainInfoPerStation *>* temp2 = temp->trains;
+void Planner::printPlanJourneys(string srcStnName, string destStnName,
+                                int maxStopOvers, int maxTransitTime)
+{
+  Entry<int> *sourceEntry = stnNameToIndex.get(srcStnName);
+  Entry<int> *destinationEntry = stnNameToIndex.get(destStnName);
 
-        // Trains of current station
-        while (temp2 != nullptr) {
+  if ((sourceEntry == nullptr) || (destinationEntry == nullptr) ||
+      (sourceEntry->value < 0) || (destinationEntry->value < 0)) {
+    cout << "Unable to plan route: source or destination station was not found."
+         << endl;
+    return;
+  }
 
-        listOfObjects<TrainInfoPerStation *> *temp4 = to2->object->trains;
+  const int source = sourceEntry->value;
+  const int destination = destinationEntry->value;
+  maxStopOvers = max(0, maxStopOvers);
+  maxTransitTime = max(0, maxTransitTime);
 
+  if (source == destination) {
+    cout << "Shortest railway route:" << endl;
+    cout << "  " << srcStnName << " (already at destination)" << endl;
+    cout << "Stop-overs: 0" << endl;
+    return;
+  }
 
-          // temp4 => Trains of next station
-          while(temp4 != nullptr) {
+  vector<JourneySearchNode> nodes;
+  map<JourneyStateKey, int> nodeForState;
+  priority_queue<pair<int, int>, vector<pair<int, int> >,
+                 greater<pair<int, int> > > frontier;
 
-            if (temp4->object->depTime - temp2->object->arrTime <= maxTransitTime) {
+  JourneySearchNode start;
+  start.key.station = source;
+  start.key.journeyCode = -1;
+  start.key.stopSequence = -1;
+  start.key.stopOvers = 0;
+  start.arrivalInfo = nullptr;
+  start.elapsedMinutes = 0;
+  start.previousNode = -1;
+  start.journeyCodeUsed = -1;
+  start.transferWaitMinutes = 0;
+  start.travelMinutes = 0;
+  nodes.push_back(start);
+  nodeForState[start.key] = 0;
+  frontier.push(make_pair(0, 0));
 
-              int nextindex = to2->object->adjacentStnIndex;
+  int destinationNode = -1;
 
-              if (nextindex == index2) {
-                if (!made) {
-                  printList = new listOfObjects<TrainInfoPerStation *>(temp4->object);
-                  made = true;
-                } else {
-                  printList->next = new listOfObjects<TrainInfoPerStation *>(temp4->object);
-                }
-                temp4 = temp4->next;
-                continue;
-              }
+  // Dijkstra runs over timetable-aware states.  Segment duration and transfer
+  // wait are non-negative edge weights, so the first destination popped is
+  // the shortest feasible scheduled route.
+  while (!frontier.empty()) {
+    int currentDistance = frontier.top().first;
+    int currentNodeIndex = frontier.top().second;
+    frontier.pop();
 
-              listOfObjects<TrainInfoPerStation *> *temp5 = newInsert->trains;
-              listOfObjects<TrainInfoPerStation *> *parenttemp5 = newInsert->trains;
+    if (currentDistance != nodes[currentNodeIndex].elapsedMinutes) continue;
+    if (nodes[currentNodeIndex].key.station == destination) {
+      destinationNode = currentNodeIndex;
+      break;
+    }
 
-              while (temp5 != nullptr) {
-                parenttemp5 = temp5;
-                temp5 = temp5->next;
-              }
+    const JourneySearchNode current = nodes[currentNodeIndex];
+    listOfObjects<StationConnectionInfo *> *connection =
+        adjacency[current.key.station].toStations;
 
-              listOfObjects<TrainInfoPerStation *> * duplicatetemp = new listOfObjects<TrainInfoPerStation *>(temp2->object);
+    while (connection != nullptr) {
+      StationConnectionInfo *connectionInfo = connection->object;
+      if ((connectionInfo == nullptr) ||
+          (connectionInfo->adjacentStnIndex < 0) ||
+          (connectionInfo->adjacentStnIndex >= DICT_SIZE)) {
+        connection = connection->next;
+        continue;
+      }
 
-              if(parenttemp5 == nullptr) {
-                newInsert->trains = duplicatetemp;
-              } else {
-                parenttemp5->next = duplicatetemp;
-              }
+      const int nextStation = connectionInfo->adjacentStnIndex;
+      listOfObjects<TrainInfoPerStation *> *outgoing = connectionInfo->trains;
 
-              added = true;
-            }
+      while (outgoing != nullptr) {
+        TrainInfoPerStation *departureInfo = outgoing->object;
+        if ((departureInfo == nullptr) || (departureInfo->depTime < 0)) {
+          outgoing = outgoing->next;
+          continue;
+        }
 
-            temp4 = temp4->next;
+        // Find this service's record at the next station.  stopSeq makes sure
+        // the record really is the arrival for this particular graph edge.
+        TrainInfoPerStation *nextArrivalInfo = nullptr;
+        listOfObjects<TrainInfoPerStation *> *candidate = stationInfo[nextStation];
+        while (candidate != nullptr) {
+          TrainInfoPerStation *candidateInfo = candidate->object;
+          if ((candidateInfo != nullptr) &&
+              (candidateInfo->journeyCode == departureInfo->journeyCode) &&
+              (candidateInfo->stopSeq == departureInfo->stopSeq + 1)) {
+            nextArrivalInfo = candidateInfo;
+            break;
+          }
+          candidate = candidate->next;
+        }
+
+        if (nextArrivalInfo == nullptr) {
+          outgoing = outgoing->next;
+          continue;
+        }
+
+        bool continuingOnTrain =
+            (current.arrivalInfo != nullptr) &&
+            (current.arrivalInfo->journeyCode == departureInfo->journeyCode) &&
+            (current.arrivalInfo->stopSeq == departureInfo->stopSeq);
+        bool changingTrain =
+            (current.arrivalInfo != nullptr) && !continuingOnTrain;
+        int nextStopOvers = current.key.stopOvers + (changingTrain ? 1 : 0);
+        if (nextStopOvers > maxStopOvers) {
+          outgoing = outgoing->next;
+          continue;
+        }
+
+        int transferWait = 0;
+        if (changingTrain) {
+          transferWait = timetableInterval(current.arrivalInfo, false,
+                                           departureInfo, true);
+          if ((transferWait >= 0) &&
+              (static_cast<long long>(transferWait) >
+               static_cast<long long>(maxTransitTime) * 60)) {
+            outgoing = outgoing->next;
+            continue;
           }
 
-          temp2 = temp2->next;
-      }
-
-        if(added) {
-
-          newInsert->adjacentStnIndex = to2->object->adjacentStnIndex;
-          queue->insert(newInsert);
-          newInsert = new StationConnectionInfo();
+          // A malformed/legacy timetable cannot provide a reliable wait.
+          // It remains searchable, but contributes no guessed wait duration.
+          if (transferWait < 0) transferWait = 0;
         }
 
-        to2 = to2->next;
+        int travelTime = timetableInterval(departureInfo, true,
+                                           nextArrivalInfo, false);
+        // Keep every edge strictly positive for Dijkstra even when timetable
+        // fields are missing or departure and arrival times are identical.
+        if (travelTime <= 0) travelTime = 1;
+
+        if (currentDistance > numeric_limits<int>::max() -
+                              transferWait - travelTime) {
+          outgoing = outgoing->next;
+          continue;
+        }
+        int nextDistance = currentDistance + transferWait + travelTime;
+
+        JourneyStateKey nextKey;
+        nextKey.station = nextStation;
+        nextKey.journeyCode = nextArrivalInfo->journeyCode;
+        nextKey.stopSequence = nextArrivalInfo->stopSeq;
+        nextKey.stopOvers = nextStopOvers;
+
+        map<JourneyStateKey, int>::iterator known = nodeForState.find(nextKey);
+        int nextNodeIndex;
+        if (known == nodeForState.end()) {
+          JourneySearchNode nextNode;
+          nextNode.key = nextKey;
+          nextNode.arrivalInfo = nextArrivalInfo;
+          nextNode.elapsedMinutes = nextDistance;
+          nextNode.previousNode = currentNodeIndex;
+          nextNode.journeyCodeUsed = departureInfo->journeyCode;
+          nextNode.transferWaitMinutes = transferWait;
+          nextNode.travelMinutes = travelTime;
+          nodes.push_back(nextNode);
+          nextNodeIndex = static_cast<int>(nodes.size()) - 1;
+          nodeForState[nextKey] = nextNodeIndex;
+          frontier.push(make_pair(nextDistance, nextNodeIndex));
+        }
+        else {
+          nextNodeIndex = known->second;
+          if (nextDistance < nodes[nextNodeIndex].elapsedMinutes) {
+            nodes[nextNodeIndex].arrivalInfo = nextArrivalInfo;
+            nodes[nextNodeIndex].elapsedMinutes = nextDistance;
+            nodes[nextNodeIndex].previousNode = currentNodeIndex;
+            nodes[nextNodeIndex].journeyCodeUsed = departureInfo->journeyCode;
+            nodes[nextNodeIndex].transferWaitMinutes = transferWait;
+            nodes[nextNodeIndex].travelMinutes = travelTime;
+            frontier.push(make_pair(nextDistance, nextNodeIndex));
+          }
+        }
+
+        outgoing = outgoing->next;
       }
 
+      connection = connection->next;
+    }
   }
 
-  if (!made) {
-    cout << "No direct journeys available" << endl;
-  } else {
-    printStationInfo(printList);
+  if (destinationNode < 0) {
+    cout << "No route from " << srcStnName << " to " << destStnName
+         << " satisfies the limits of " << maxStopOvers
+         << " stop-over(s) and " << maxTransitTime
+         << " transit hour(s) per stop-over." << endl;
+    return;
   }
 
-  
-  return;
+  vector<int> route;
+  for (int nodeIndex = destinationNode; nodeIndex >= 0;
+       nodeIndex = nodes[nodeIndex].previousNode) {
+    route.push_back(nodeIndex);
+  }
+  reverse(route.begin(), route.end());
+
+  cout << "Shortest railway route (Dijkstra):" << endl;
+  cout << "  " << stnNameToIndex.getKeyAtIndex(source) << endl;
+  for (size_t i = 1; i < route.size(); i++) {
+    const JourneySearchNode &leg = nodes[route[i]];
+    cout << "    -- journey " << leg.journeyCodeUsed;
+    if (leg.transferWaitMinutes > 0) {
+      cout << ", transfer wait " << formatMinutes(leg.transferWaitMinutes);
+    }
+    cout << ", travel " << formatMinutes(leg.travelMinutes) << " -->" << endl;
+    cout << "  " << stnNameToIndex.getKeyAtIndex(leg.key.station) << endl;
+  }
+  cout << "Total scheduled time: "
+       << formatMinutes(nodes[destinationNode].elapsedMinutes) << endl;
+  cout << "Stop-overs (train changes): "
+       << nodes[destinationNode].key.stopOvers << endl;
 }
 
 #endif

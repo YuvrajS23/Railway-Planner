@@ -55,7 +55,8 @@ class Planner {
   Planner(string logFileName) {
     numStations = 0;
     numJCodeSrcDestn = 0;
-    lastReviewId = -1;
+    // Review ids are user-facing and start at 1.
+    lastReviewId = 0;
     logFile.open(logFileName, ios::out);
     if (!logFile.is_open()) {
       cout << "Critical error: Failed to open log file \"" << logFileName << "\"" << endl;
